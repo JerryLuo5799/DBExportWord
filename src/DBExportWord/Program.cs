@@ -5,19 +5,22 @@ using NPOI.XWPF.UserModel;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using static ExportWordUtils;
 
 namespace DBExportWord
 {
     class Program
     {
-        static string _dataBaseName = "safety_index_api";
+        static string _dataBaseName = "pb_gongshu";
         static string _MySqlGetConnectionString
         {
             get
             {
-                return $"server=127.0.0.1;database={_dataBaseName};uid=*******;pwd=**********;";
+                return $"server=rm-bp1451ry3ll508ex4do.mysql.rds.aliyuncs.com; port=3306; database={_dataBaseName};uid=yunluadmin;pwd=Yunlu2021!;";
             }
         }
         static string _MysqlGetTableSQL
@@ -25,7 +28,7 @@ namespace DBExportWord
             get
             {
                 return $"select table_name as tableName, table_comment as tableComment from information_schema.tables " +
-                    $"where table_schema = '{_dataBaseName}' and table_type = 'base table';";
+                    $"where table_schema = '{_dataBaseName}' and table_type = 'BASE TABLE';";
             }
         }
 
@@ -62,8 +65,9 @@ namespace DBExportWord
 
             Console.WriteLine($"开始检索数据库{_dataBaseName}所有表...");
             var result = GetTableSchema<Table>(_MysqlGetTableSQL);
+            var filteredResult = result.Where(t => !IsFilteredTable(t.TableName)).ToList();
 
-            Console.WriteLine($"总计 {result.Count} 表, 开始生成文档...");
+            Console.WriteLine($"总计 {filteredResult.Count} 表(过滤后), 开始生成文档...");
             List<TableMapping> listMapping = new List<TableMapping>();
             listMapping.Add(new TableMapping() { DBColumn = "", DocumentColumn = "序号", ColumnWidth = 1000 });
             listMapping.Add(new TableMapping() { DBColumn = "code", DocumentColumn = "名称", ColumnWidth = 1000 });
@@ -73,7 +77,7 @@ namespace DBExportWord
             listMapping.Add(new TableMapping() { DBColumn = "columnKey", DocumentColumn = "主键", ColumnWidth = 1000 });
             listMapping.Add(new TableMapping() { DBColumn = "IsNullable", DocumentColumn = "可空", ColumnWidth = 1000 });
             listMapping.Add(new TableMapping() { DBColumn = "defaultValue", DocumentColumn = "缺省", ColumnWidth = 1000 });
-            ExportDocument(result, listMapping, $"{_dataBaseName}.docx");
+            ExportDocument(filteredResult, listMapping, $"{_dataBaseName}.docx");
             // select table_name from information_schema.tables where table_schema = 'csdb' and table_type = 'base table';
 
             Console.WriteLine($"数据库文档 {_dataBaseName} 生成成功");
@@ -109,6 +113,21 @@ namespace DBExportWord
             setPr.pgSz.w = (ulong)size.Item1;
             setPr.pgSz.h = (ulong)size.Item2;
 
+            // 通过反射向 styles.xml 中写入 Heading2 样式定义，使 Word 能正确识别并显示样式
+            XWPFStyles styles = doc.CreateStyles();
+            var ctStylesField = typeof(XWPFStyles).GetField("ctStyles", BindingFlags.NonPublic | BindingFlags.Instance);
+            var ctStyles = ctStylesField?.GetValue(styles) as CT_Styles;
+            if (ctStyles != null)
+            {
+                CT_Style heading2 = new CT_Style();
+                heading2.styleId = "2";
+                heading2.type = ST_StyleType.paragraph;
+                heading2.name = new CT_String() { val = "heading 2" };
+                heading2.pPr = new CT_PPr();
+                heading2.pPr.outlineLvl = new CT_DecimalNumber() { val = "1" };
+                ctStyles.style.Add(heading2);
+            }
+
             int tableNum = 0;
             foreach (var table in listTable)
             {
@@ -125,13 +144,13 @@ namespace DBExportWord
                 //创建一个段落
                 XWPFParagraph gp = doc.CreateParagraph();
 
-                XWPFStyles styles = doc.CreateStyles();
+                // 设置段落为 Heading2 样式，同时设置 outlineLvl 确保 Word 导航窗格可识别
+                var pPr = gp.GetCTP().AddNewPPr();
+                pPr.pStyle = new CT_String() { val = "2" };
+                pPr.outlineLvl = new CT_DecimalNumber() { val = "1" };
 
-                //表格段落标题
-                gp.SetNumID($"2.1");
-                gp.Style = "Heading2";
                 XWPFRun gr = gp.CreateRun();
-                gr.SetText($"{tableTitle}");
+                gr.SetText($"{tableNum}. {tableTitle}");
 
                 //获取表字段信息
                 var listTableSchema = GetTableSchema<TableSchema>(MysqlGetTableSchemaSQL(table.TableName));
@@ -244,6 +263,22 @@ namespace DBExportWord
         {
             object value = data.GetType().GetProperty(propName).GetValue(data, null);
             return null == value ? string.Empty : value.ToString();
+        }
+
+        /// <summary>
+        /// 过滤copy表和备份表
+        /// </summary>
+        private static bool IsFilteredTable(string tableName)
+        {
+            // 过滤copy表: t_xxx_copy, t_xxx_copy1
+            if (Regex.IsMatch(tableName, @".*_copy\d*$", RegexOptions.IgnoreCase))
+                return true;
+
+            // 过滤备份表: t_xxx_20260609 (YYYYMMDD日期格式)
+            if (Regex.IsMatch(tableName, @".*_20\d{6}$", RegexOptions.IgnoreCase))
+                return true;
+
+            return false;
         }
     }
 
